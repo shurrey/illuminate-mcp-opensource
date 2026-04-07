@@ -8,7 +8,7 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_load(self) -> None:
         config = AppConfig.from_env({})
         self.assertEqual(config.allowed_domains, ("CDM_LMS", "CDM_TLM", "CDM_ALY"))
-        self.assertTrue(config.require_query_confirmation)
+        self.assertFalse(config.require_query_confirmation)
         self.assertEqual(config.monthly_credit_budget, 100.0)
         self.assertFalse(config.enable_metadata_introspection)
         self.assertFalse(config.enable_persistent_feedback)

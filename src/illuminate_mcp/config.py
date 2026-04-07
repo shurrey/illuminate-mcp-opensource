@@ -131,7 +131,7 @@ class AppConfig:
             ),
             require_query_confirmation=_as_bool(
                 env.get("REQUIRE_QUERY_CONFIRMATION"),
-                True,
+                False,
             ),
             default_session_approval_mode=env.get(
                 "DEFAULT_SESSION_APPROVAL_MODE",

@@ -163,6 +163,11 @@ class MetadataStore:
     def domains(self) -> List[str]:
         return list(self._domains.keys())
 
+    def without_domains(self, exclude: Iterable[str]) -> "MetadataStore":
+        """Return a new MetadataStore with the specified domains removed."""
+        exclude_set = {d.upper() for d in exclude}
+        return MetadataStore({k: v for k, v in self._domains.items() if k not in exclude_set})
+
     def resource_snapshot(self) -> dict:
         return {
             domain: {
@@ -188,9 +193,17 @@ def build_metadata_store(config: AppConfig) -> Tuple[MetadataStore, MetadataLoad
 
     try:
         tables, columns, dictionary = _load_from_snowflake(config)
+        store = MetadataStore.from_records(config.allowed_domains, tables, columns, dictionary)
+        # Filter out domains with zero entities (schema exists but has no tables)
+        empty_domains = [d for d in store.domains() if not store.list_entities(d)]
+        if empty_domains:
+            store = store.without_domains(empty_domains)
+        warning = None
+        if empty_domains:
+            warning = f"Domains with no tables excluded: {', '.join(empty_domains)}"
         return (
-            MetadataStore.from_records(config.allowed_domains, tables, columns, dictionary),
-            MetadataLoadStatus(source="snowflake", warning=None),
+            store,
+            MetadataLoadStatus(source="snowflake", warning=warning),
         )
     except Exception as exc:
         return (

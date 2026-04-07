@@ -15,7 +15,27 @@ from .metadata import MetadataLoadStatus, MetadataStore, build_metadata_store
 from .output import OutputComposer
 from .planner import SqlPlanner
 from .policy import SqlPolicy
+from .insights_app import (
+    INSIGHTS_FEED_CSP,
+    INSIGHTS_FEED_URI,
+    insights_feed_html,
+)
+from .results_app import (
+    RESULTS_DASHBOARD_CSP,
+    RESULTS_DASHBOARD_URI,
+    results_dashboard_html,
+)
+from .schema_explorer_app import (
+    SCHEMA_EXPLORER_CSP,
+    SCHEMA_EXPLORER_URI,
+    schema_explorer_html,
+)
 from .session import SessionState
+from .sql_viewer_app import (
+    SQL_VIEWER_CSP,
+    SQL_VIEWER_URI,
+    sql_viewer_html,
+)
 from .tool_handlers import ToolRegistry
 
 
@@ -129,8 +149,15 @@ class MCPServer:
                 "prompts": {"listChanged": False},
             },
             "instructions": (
-                "Use list_domains/list_entities/describe_entity before generating SQL. "
-                "run_query requires confirmation by default unless session approval is set to approve-all. "
+                "Use list_domains/list_entities/describe_entity for query planning and SQL generation. "
+                "Use run_query for data gathering — it returns data silently with no UI. "
+                "Use display_query to present final results to the user — pass the result_id from a "
+                "previous run_query response (preferred), or columns+rows for small datasets. "
+                "If the answer is text analysis with no data to show, just respond in text without calling display_query. "
+                "Only call open_schema_explorer when the user explicitly asks to explore or browse the schema — "
+                "never call it as part of your own query planning workflow. "
+                "Use display_sql when the user asks to see, generate, or review a SQL query — shows it formatted with copy button. "
+                "Use discover_insights when the user asks for anomalies, red flags, insights, or what they should look at. "
                 + metadata_note
             ),
         }
@@ -140,7 +167,7 @@ class MCPServer:
         if not isinstance(name, str):
             raise ValueError("tools/call requires params.name")
 
-        if name in {"list_domains", "list_entities", "describe_entity", "generate_sql", "plan_query"}:
+        if name in {"open_schema_explorer", "list_domains", "list_entities", "describe_entity", "generate_sql", "plan_query"}:
             self._ensure_metadata_loaded()
 
         arguments = params.get("arguments") or {}
@@ -159,7 +186,7 @@ class MCPServer:
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps(error_payload, indent=2, sort_keys=True),
+                        "text": json.dumps(error_payload, indent=2, sort_keys=True, default=str),
                     }
                 ],
                 "structuredContent": error_payload,
@@ -170,7 +197,7 @@ class MCPServer:
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(payload, indent=2, sort_keys=True),
+                    "text": json.dumps(payload, indent=2, sort_keys=True, default=str),
                 }
             ],
             "structuredContent": payload,
@@ -210,6 +237,54 @@ class MCPServer:
                     "name": "Entity Details Template",
                     "description": "Template URI for a single entity description",
                     "mimeType": "application/json",
+                },
+                {
+                    "uri": RESULTS_DASHBOARD_URI,
+                    "name": "Results Dashboard",
+                    "description": "Interactive query results dashboard (MCP App)",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "_meta": {
+                        "ui": {
+                            "csp": RESULTS_DASHBOARD_CSP,
+                            "prefersBorder": True,
+                        },
+                    },
+                },
+                {
+                    "uri": SCHEMA_EXPLORER_URI,
+                    "name": "Schema Explorer",
+                    "description": "Interactive schema browser with entity relationships (MCP App)",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "_meta": {
+                        "ui": {
+                            "csp": SCHEMA_EXPLORER_CSP,
+                            "prefersBorder": True,
+                        },
+                    },
+                },
+                {
+                    "uri": SQL_VIEWER_URI,
+                    "name": "SQL Viewer",
+                    "description": "Syntax-highlighted SQL viewer with copy and run buttons (MCP App)",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "_meta": {
+                        "ui": {
+                            "csp": SQL_VIEWER_CSP,
+                            "prefersBorder": True,
+                        },
+                    },
+                },
+                {
+                    "uri": INSIGHTS_FEED_URI,
+                    "name": "Insights Feed",
+                    "description": "Interactive anomaly and trend findings feed (MCP App)",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "_meta": {
+                        "ui": {
+                            "csp": INSIGHTS_FEED_CSP,
+                            "prefersBorder": True,
+                        },
+                    },
                 },
             ]
         }
@@ -263,6 +338,46 @@ class MCPServer:
             if not described:
                 raise ValueError(f"Unknown entity URI: {uri}")
             contents = described
+        elif uri == RESULTS_DASHBOARD_URI:
+            return {
+                "contents": [
+                    {
+                        "uri": RESULTS_DASHBOARD_URI,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": results_dashboard_html(),
+                    }
+                ]
+            }
+        elif uri == SCHEMA_EXPLORER_URI:
+            return {
+                "contents": [
+                    {
+                        "uri": SCHEMA_EXPLORER_URI,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": schema_explorer_html(),
+                    }
+                ]
+            }
+        elif uri == SQL_VIEWER_URI:
+            return {
+                "contents": [
+                    {
+                        "uri": SQL_VIEWER_URI,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": sql_viewer_html(),
+                    }
+                ]
+            }
+        elif uri == INSIGHTS_FEED_URI:
+            return {
+                "contents": [
+                    {
+                        "uri": INSIGHTS_FEED_URI,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": insights_feed_html(),
+                    }
+                ]
+            }
         else:
             raise ValueError(f"Unknown resource URI: {uri}")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import re
 import time
+import uuid
 
 from .async_jobs import AsyncJobManager
 from .budget import BudgetTracker
@@ -17,7 +18,14 @@ from .metadata import MetadataStore
 from .output import OutputComposer
 from .planner import SqlPlanner
 from .policy import SqlPolicy
+from .query_optimizer import optimize_query
 from .refinement import CandidateEngine, extract_entities_from_sql, probe_rank
+from .insights import run_diagnostics
+from .insights_app import INSIGHTS_FEED_URI
+from .results_app import RESULTS_DASHBOARD_URI
+from .schema_explorer_app import SCHEMA_EXPLORER_URI
+from .semantic_model import SemanticModel
+from .sql_viewer_app import SQL_VIEWER_URI
 from .session import SessionState
 
 
@@ -44,6 +52,7 @@ class ToolRegistry:
         self._output = output
         self._planner = planner
         self._jobs = AsyncJobManager()
+        self._result_cache: Dict[str, dict] = {}  # result_id -> {columns, rows, sql, question}
         persist_path = config.feedback_store_path if config.enable_persistent_feedback else None
         self._feedback = PlannerFeedbackStore(persist_path=persist_path)
         self._engine = CandidateEngine(
@@ -54,6 +63,7 @@ class ToolRegistry:
         )
 
         self._tools = {
+            "open_schema_explorer": self._open_schema_explorer,
             "list_domains": self._list_domains,
             "list_entities": self._list_entities,
             "describe_entity": self._describe_entity,
@@ -62,9 +72,12 @@ class ToolRegistry:
             "refine_sql": self._refine_sql,
             "explain_query": self._explain_query,
             "run_query": self._run_query,
+            "display_query": self._display_query,
+            "display_sql": self._display_sql,
             "start_query": self._start_query,
             "get_query_status": self._get_query_status,
             "get_query_results": self._get_query_results,
+            "discover_insights": self._discover_insights,
             "get_planner_feedback": self._get_planner_feedback,
             "set_session_approval": self._set_session_approval,
             "get_budget_status": self._get_budget_status,
@@ -76,6 +89,19 @@ class ToolRegistry:
 
     def tool_definitions(self) -> List[dict]:
         return [
+            {
+                "name": "open_schema_explorer",
+                "description": (
+                    "Open the interactive visual schema explorer for the user to browse domains, "
+                    "entities, columns, and relationships. Only call this when the user explicitly "
+                    "asks to explore or browse the schema. Do NOT call this for query planning — "
+                    "use list_domains, list_entities, and describe_entity instead."
+                ),
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                "_meta": {
+                    "ui": {"resourceUri": SCHEMA_EXPLORER_URI},
+                },
+            },
             {
                 "name": "list_domains",
                 "description": "List configured CDM domains",
@@ -156,7 +182,11 @@ class ToolRegistry:
             },
             {
                 "name": "run_query",
-                "description": "Validate and execute SQL with confirmation controls",
+                "description": (
+                    "Execute SQL and return results. Use this for intermediate data gathering "
+                    "during analysis. No interactive UI is rendered. For presenting final results "
+                    "to the user with an interactive dashboard, use display_query instead."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -168,6 +198,64 @@ class ToolRegistry:
                     },
                     "required": ["sql"],
                     "additionalProperties": False,
+                },
+            },
+            {
+                "name": "display_query",
+                "description": (
+                    "Display results in an interactive dashboard for the user. "
+                    "Preferred: pass result_id from a previous run_query response (avoids re-serializing data). "
+                    "Alternative: pass columns and rows directly for small datasets. "
+                    "Only call this when presenting final results the user should see."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "result_id": {
+                            "type": "string",
+                            "description": "result_id from a previous run_query response (preferred — avoids large payloads)",
+                        },
+                        "columns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Column names (alternative to result_id, for small datasets)",
+                        },
+                        "rows": {
+                            "type": "array",
+                            "items": {"type": "array"},
+                            "description": "Row data (alternative to result_id, for small datasets)",
+                        },
+                        "question": {"type": "string"},
+                        "sql": {"type": "string", "description": "The SQL that produced these results (for reference)"},
+                    },
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "ui": {"resourceUri": RESULTS_DASHBOARD_URI},
+                },
+            },
+            {
+                "name": "display_sql",
+                "description": (
+                    "Display a SQL query in an interactive viewer with syntax highlighting and copy button. "
+                    "Use this when the user asks to see, generate, or review a SQL query. "
+                    "Do NOT use this for running queries — use run_query or display_query instead."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "The SQL query to display"},
+                        "title": {"type": "string", "description": "Title for the query (e.g., 'Enrollment by Term')"},
+                        "description": {"type": "string", "description": "Explanation of what the query does"},
+                        "domain": {"type": "string", "description": "The CDM domain this query targets"},
+                        "confidence": {"type": "number", "description": "Confidence score (0-1) if from the planner"},
+                        "complexity": {"type": "string", "description": "Complexity level (low/moderate/high)"},
+                    },
+                    "required": ["sql"],
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "ui": {"resourceUri": SQL_VIEWER_URI},
                 },
             },
             {
@@ -231,6 +319,29 @@ class ToolRegistry:
                 "description": "Return current budget tracking status",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
+            {
+                "name": "discover_insights",
+                "description": (
+                    "Scan configured domains for data anomalies, trends, and potential issues. "
+                    "Returns ranked insight cards with severity levels. Call this when the user "
+                    "asks for insights, red flags, anomalies, or what they should be looking at. "
+                    "Requires query execution to be enabled."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "domains": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional subset of domains to scan. Defaults to all configured domains.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "ui": {"resourceUri": INSIGHTS_FEED_URI},
+                },
+            },
         ]
 
     def call(self, name: str, arguments: Dict[str, Any]) -> dict:
@@ -238,6 +349,48 @@ class ToolRegistry:
         if not handler:
             raise ToolError(f"Unknown tool: {name}")
         return handler(arguments)
+
+    # ------------------------------------------------------------------
+    # Schema explorer
+    # ------------------------------------------------------------------
+
+    def _open_schema_explorer(self, _arguments: Dict[str, Any]) -> dict:
+        # Lightweight catalog: domain/entity names and descriptions only.
+        # Column details are fetched on demand via describe_entity.
+        catalog: Dict[str, dict] = {}
+        for domain_info in self._metadata.list_domains():
+            domain_name = domain_info["name"]
+            entities: Dict[str, dict] = {}
+            for entity_info in self._metadata.list_entities(domain_name):
+                entities[entity_info["name"]] = {
+                    "description": entity_info.get("description", ""),
+                    "column_count": entity_info.get("column_count", 0),
+                }
+            catalog[domain_name] = {
+                "description": domain_info.get("description", ""),
+                "entities": entities,
+            }
+
+        rels: Dict[str, list] = {}
+        for domain in self._metadata.domains():
+            model = SemanticModel.from_metadata(self._metadata, domain)
+            seen: set = set()
+            domain_rels = []
+            for rel in model.relationships:
+                key = tuple(sorted([(rel.source_entity, rel.source_column),
+                                     (rel.target_entity, rel.target_column)]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                domain_rels.append({
+                    "source_entity": rel.source_entity,
+                    "source_column": rel.source_column,
+                    "target_entity": rel.target_entity,
+                    "target_column": rel.target_column,
+                    "confidence": round(rel.confidence, 2),
+                })
+            rels[domain] = domain_rels
+        return {"catalog": catalog, "relationships": rels}
 
     # ------------------------------------------------------------------
     # Metadata tools
@@ -470,13 +623,35 @@ class ToolRegistry:
         if "needs_confirmation" in prepared:
             return prepared["needs_confirmation"]
 
-        return self._execute_query(
+        result = self._execute_query(
             normalized_sql=prepared["normalized_sql"],
             referenced_objects=prepared["referenced_objects"],
             row_limit=prepared["row_limit"],
             question=prepared["question"],
             output_mode=prepared["output_mode"],
         )
+        if prepared.get("optimizations_applied"):
+            result["optimizations_applied"] = prepared["optimizations_applied"]
+        if prepared.get("optimization_warnings"):
+            result["optimization_warnings"] = prepared["optimization_warnings"]
+
+        # Cache results so display_query can reference them by ID
+        if result.get("status") == "ok" and result.get("output"):
+            rid = str(uuid.uuid4())[:8]
+            table = result["output"].get("table", {})
+            self._result_cache[rid] = {
+                "columns": table.get("columns", []),
+                "rows": table.get("rows", []),
+                "sql": prepared["normalized_sql"],
+                "question": prepared["question"],
+            }
+            result["result_id"] = rid
+            # Keep cache bounded
+            if len(self._result_cache) > 20:
+                oldest = next(iter(self._result_cache))
+                del self._result_cache[oldest]
+
+        return result
 
     def _start_query(self, arguments: Dict[str, Any]) -> dict:
         sql = arguments.get("sql")
@@ -523,6 +698,52 @@ class ToolRegistry:
             raise ToolError(f"unknown job_id: {job_id}")
         return result
 
+    def _display_query(self, arguments: Dict[str, Any]) -> dict:
+        # Option 1: result_id from a previous run_query (preferred — no LLM passthrough)
+        result_id = arguments.get("result_id")
+        if result_id:
+            cached = self._result_cache.get(str(result_id))
+            if not cached:
+                raise ToolError(f"result_id {result_id!r} not found — it may have expired")
+            columns = cached["columns"]
+            rows = cached["rows"]
+            question = arguments.get("question") or cached.get("question", "")
+            sql = cached.get("sql", "")
+        else:
+            # Option 2: columns + rows passed directly (small datasets)
+            columns = arguments.get("columns")
+            rows = arguments.get("rows")
+            if not isinstance(columns, list) or not isinstance(rows, list):
+                raise ToolError("Either result_id or columns+rows is required")
+            question = arguments.get("question") or ""
+            sql = arguments.get("sql") or ""
+
+        output = self._output.compose(
+            question=question,
+            columns=columns,
+            rows=rows,
+            output_mode="auto",
+        )
+        return {
+            "status": "ok",
+            "message": "Displaying results.",
+            "normalized_sql": sql,
+            "output": output,
+        }
+
+    def _display_sql(self, arguments: Dict[str, Any]) -> dict:
+        sql = arguments.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            raise ToolError("sql is required")
+        return {
+            "sql": sql.strip(),
+            "title": arguments.get("title") or "Generated SQL",
+            "description": arguments.get("description") or "",
+            "domain": arguments.get("domain") or "",
+            "confidence": arguments.get("confidence"),
+            "complexity": arguments.get("complexity") or "",
+        }
+
     def _prepare_query(self, arguments: Dict[str, Any], sql: str) -> dict:
         policy_result = self._policy.validate(sql)
         approved = bool(arguments.get("approved", False))
@@ -543,13 +764,27 @@ class ToolRegistry:
         row_limit = max(1, min(row_limit, self._config.max_rows))
         output_mode = arguments.get("output_mode") or self._config.default_output_mode
         question = arguments.get("question") or ""
-        return {
-            "normalized_sql": policy_result.normalized_sql,
+
+        # Run pre-execution optimizer
+        opt = optimize_query(
+            sql=policy_result.normalized_sql,
+            question=question,
+            config=self._config,
+            executor=self._executor,
+        )
+
+        result = {
+            "normalized_sql": opt.sql,
             "referenced_objects": list(policy_result.referenced_objects),
             "row_limit": row_limit,
             "output_mode": output_mode,
             "question": question,
         }
+        if opt.applied:
+            result["optimizations_applied"] = opt.applied
+        if opt.warnings:
+            result["optimization_warnings"] = opt.warnings
+        return result
 
     def _execute_query(
         self,
@@ -623,3 +858,40 @@ class ToolRegistry:
 
     def _get_budget_status(self, _arguments: Dict[str, Any]) -> dict:
         return self._budget.status()
+
+    # ------------------------------------------------------------------
+    # Insights discovery
+    # ------------------------------------------------------------------
+
+    def _discover_insights(self, arguments: Dict[str, Any]) -> dict:
+        if not self._config.enable_query_execution:
+            return {
+                "status": "execution_disabled",
+                "message": "Insights discovery requires query execution (ENABLE_QUERY_EXECUTION=true).",
+                "findings": [],
+                "domains_scanned": [],
+                "queries_run": 0,
+                "queries_failed": 0,
+                "scan_seconds": 0.0,
+            }
+
+        requested = arguments.get("domains")
+        if requested:
+            domains = [d.upper() for d in requested]
+            for d in domains:
+                if d not in self._config.allowed_domains:
+                    raise ToolError(f"Domain {d!r} is not in ALLOWED_DOMAINS")
+        else:
+            domains = list(self._config.allowed_domains)
+
+        from dataclasses import asdict
+        findings, stats = run_diagnostics(
+            executor=self._executor,
+            config=self._config,
+            allowed_domains=domains,
+        )
+        return {
+            "status": "ok",
+            "findings": [asdict(f) for f in findings],
+            **stats,
+        }
