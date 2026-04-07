@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import re
 import time
-import uuid
 
 from .async_jobs import AsyncJobManager
 from .budget import BudgetTracker
@@ -52,7 +51,6 @@ class ToolRegistry:
         self._output = output
         self._planner = planner
         self._jobs = AsyncJobManager()
-        self._result_cache: Dict[str, dict] = {}  # result_id -> {columns, rows, sql, question}
         persist_path = config.feedback_store_path if config.enable_persistent_feedback else None
         self._feedback = PlannerFeedbackStore(persist_path=persist_path)
         self._engine = CandidateEngine(
@@ -74,6 +72,7 @@ class ToolRegistry:
             "run_query": self._run_query,
             "display_query": self._display_query,
             "display_sql": self._display_sql,
+            "get_result_page": self._get_result_page,
             "start_query": self._start_query,
             "get_query_status": self._get_query_status,
             "get_query_results": self._get_query_results,
@@ -183,9 +182,10 @@ class ToolRegistry:
             {
                 "name": "run_query",
                 "description": (
-                    "Execute SQL and return results. Use this for intermediate data gathering "
-                    "during analysis. No interactive UI is rendered. For presenting final results "
-                    "to the user with an interactive dashboard, use display_query instead."
+                    "Execute SQL and return results as data. ALWAYS use this as your default query tool. "
+                    "No UI is rendered — results are returned to you for analysis. "
+                    "Only use display_query AFTER you have already run queries with run_query and are "
+                    "ready to show the user a final interactive view."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -203,31 +203,21 @@ class ToolRegistry:
             {
                 "name": "display_query",
                 "description": (
-                    "Display results in an interactive dashboard for the user. "
-                    "Preferred: pass result_id from a previous run_query response (avoids re-serializing data). "
-                    "Alternative: pass columns and rows directly for small datasets. "
-                    "Only call this when presenting final results the user should see."
+                    "Display an interactive results dashboard to the user. ONLY call this when you "
+                    "have finished your analysis and want to show the user a table/chart they can "
+                    "interact with. Pass the same SQL you used with run_query. "
+                    "Do NOT use this for your own data gathering — use run_query instead."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "result_id": {
-                            "type": "string",
-                            "description": "result_id from a previous run_query response (preferred — avoids large payloads)",
-                        },
-                        "columns": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Column names (alternative to result_id, for small datasets)",
-                        },
-                        "rows": {
-                            "type": "array",
-                            "items": {"type": "array"},
-                            "description": "Row data (alternative to result_id, for small datasets)",
-                        },
+                        "sql": {"type": "string"},
                         "question": {"type": "string"},
-                        "sql": {"type": "string", "description": "The SQL that produced these results (for reference)"},
+                        "row_limit": {"type": "integer"},
+                        "output_mode": {"type": "string"},
+                        "approved": {"type": "boolean"},
                     },
+                    "required": ["sql"],
                     "additionalProperties": False,
                 },
                 "_meta": {
@@ -272,6 +262,23 @@ class ToolRegistry:
                     },
                     "required": ["sql"],
                     "additionalProperties": False,
+                },
+            },
+            {
+                "name": "get_result_page",
+                "description": "Fetch a page of rows for a previously executed SQL query (used by UI apps for pagination)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "The SQL to re-execute (Snowflake returns cached results)"},
+                        "offset": {"type": "integer", "description": "Number of rows to skip"},
+                        "limit": {"type": "integer", "description": "Number of rows to return"},
+                    },
+                    "required": ["sql", "offset", "limit"],
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "ui": {"visibility": ["app"]},
                 },
             },
             {
@@ -634,23 +641,6 @@ class ToolRegistry:
             result["optimizations_applied"] = prepared["optimizations_applied"]
         if prepared.get("optimization_warnings"):
             result["optimization_warnings"] = prepared["optimization_warnings"]
-
-        # Cache results so display_query can reference them by ID
-        if result.get("status") == "ok" and result.get("output"):
-            rid = str(uuid.uuid4())[:8]
-            table = result["output"].get("table", {})
-            self._result_cache[rid] = {
-                "columns": table.get("columns", []),
-                "rows": table.get("rows", []),
-                "sql": prepared["normalized_sql"],
-                "question": prepared["question"],
-            }
-            result["result_id"] = rid
-            # Keep cache bounded
-            if len(self._result_cache) > 20:
-                oldest = next(iter(self._result_cache))
-                del self._result_cache[oldest]
-
         return result
 
     def _start_query(self, arguments: Dict[str, Any]) -> dict:
@@ -699,36 +689,54 @@ class ToolRegistry:
         return result
 
     def _display_query(self, arguments: Dict[str, Any]) -> dict:
-        # Option 1: result_id from a previous run_query (preferred — no LLM passthrough)
-        result_id = arguments.get("result_id")
-        if result_id:
-            cached = self._result_cache.get(str(result_id))
-            if not cached:
-                raise ToolError(f"result_id {result_id!r} not found — it may have expired")
-            columns = cached["columns"]
-            rows = cached["rows"]
-            question = arguments.get("question") or cached.get("question", "")
-            sql = cached.get("sql", "")
-        else:
-            # Option 2: columns + rows passed directly (small datasets)
-            columns = arguments.get("columns")
-            rows = arguments.get("rows")
-            if not isinstance(columns, list) or not isinstance(rows, list):
-                raise ToolError("Either result_id or columns+rows is required")
-            question = arguments.get("question") or ""
-            sql = arguments.get("sql") or ""
+        sql = arguments.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            raise ToolError("sql is required")
 
-        output = self._output.compose(
-            question=question,
-            columns=columns,
-            rows=rows,
-            output_mode="auto",
+        prepared = self._prepare_query(arguments, sql)
+        if "needs_confirmation" in prepared:
+            return prepared["needs_confirmation"]
+
+        return self._execute_query(
+            normalized_sql=prepared["normalized_sql"],
+            referenced_objects=prepared["referenced_objects"],
+            row_limit=prepared["row_limit"],
+            question=prepared["question"],
+            output_mode=prepared["output_mode"],
+            max_initial_rows=100,  # first page only — app fetches more via get_result_page
         )
+
+    def _get_result_page(self, arguments: Dict[str, Any]) -> dict:
+        sql = arguments.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            raise ToolError("sql is required")
+        offset = int(arguments.get("offset", 0))
+        limit = int(arguments.get("limit", 100))
+        limit = max(1, min(limit, 500))
+
+        # Wrap the original SQL with LIMIT/OFFSET for pagination
+        normalized = sql.strip().rstrip(";")
+        # Remove any existing LIMIT from the SQL
+        import re as _re
+        normalized = _re.sub(r"\bLIMIT\s+\d+\b", "", normalized, flags=_re.IGNORECASE).strip()
+        paged_sql = f"SELECT * FROM ({normalized}) AS _paged LIMIT {limit} OFFSET {offset}"
+
+        try:
+            result = self._executor.run_query(paged_sql, row_limit=limit)
+        except Exception as exc:
+            raise ToolError(f"Pagination query failed: {exc}")
+
+        if result.status != "ok":
+            return {"status": result.status, "message": result.message, "columns": [], "rows": []}
+
+        safe_rows = [self._output._to_json_safe_row(row) for row in result.rows]
         return {
             "status": "ok",
-            "message": "Displaying results.",
-            "normalized_sql": sql,
-            "output": output,
+            "columns": list(result.columns),
+            "rows": safe_rows,
+            "offset": offset,
+            "limit": limit,
+            "row_count": len(safe_rows),
         }
 
     def _display_sql(self, arguments: Dict[str, Any]) -> dict:
@@ -793,6 +801,7 @@ class ToolRegistry:
         row_limit: int,
         question: str,
         output_mode: str,
+        max_initial_rows: int = 0,
     ) -> dict:
         engine = self._engine
         started = time.time()
@@ -827,6 +836,7 @@ class ToolRegistry:
                 columns=result.columns,
                 rows=result.rows,
                 output_mode=output_mode,
+                max_initial_rows=max_initial_rows,
             )
             diagnostics = engine.diagnose_no_data(
                 output=payload["output"],

@@ -204,33 +204,31 @@ td.expandable:hover { color: var(--accent); }
 }
 .chart-container canvas { width: 100% !important; max-height: 400px; }
 
-/* ── Drill-down panel ───────────────────────────────────── */
-.drill-panel {
-  margin-top: 12px; padding: 14px 16px; background: var(--bg-secondary);
-  border: 1px solid var(--accent); border-radius: var(--radius);
-  font-size: 13px; display: none; animation: slideIn 0.2s ease-out;
+/* ── Drill-down popover ─────────────────────────────────── */
+.drill-popover {
+  position: fixed; z-index: 200;
+  background: var(--bg); border: 1px solid var(--accent);
+  border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+  width: min(380px, calc(100vw - 24px)); padding: 12px 14px;
+  font-size: 13px; animation: popIn 0.12s ease-out;
 }
+@keyframes popIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
 .drill-header {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
 }
-.drill-panel .label { font-weight: 600; color: var(--accent); }
-.drill-panel .value { font-family: var(--mono); flex: 1; }
-.drill-status {
-  font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap;
-}
-.drill-status.ok { background: #10b98122; color: var(--success); }
-.drill-status.fail { background: #ef444422; color: var(--error); }
+.drill-popover .label { font-weight: 600; color: var(--accent); font-size: 12px; }
+.drill-popover .value { font-family: var(--mono); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drill-close {
   background: none; border: none; color: var(--text-muted); font-size: 18px;
-  cursor: pointer; padding: 0 4px; line-height: 1;
+  cursor: pointer; padding: 0 4px; line-height: 1; border-radius: 4px;
 }
-.drill-close:hover { color: var(--text); }
+.drill-close:hover { color: var(--text); background: var(--bg-hover); }
 .drill-suggestions {
-  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+  display: flex; flex-wrap: wrap; gap: 6px;
 }
 .drill-suggestions button {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
-  padding: 5px 14px; font-size: 12px; color: var(--text);
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 16px;
+  padding: 5px 12px; font-size: 11px; color: var(--text);
   cursor: pointer; transition: all 0.15s; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -241,20 +239,6 @@ td.expandable:hover { color: var(--accent); }
   border-color: var(--success); color: var(--success); background: #10b98115;
   pointer-events: none;
 }
-.drill-sent-banner {
-  margin-top: 10px; padding: 10px 14px; background: var(--bg);
-  border: 1px solid var(--success); border-radius: var(--radius);
-  display: none; animation: slideIn 0.15s ease-out;
-}
-.drill-sent-banner .sent-label {
-  display: flex; align-items: center; gap: 6px; font-size: 12px;
-  color: var(--success); font-weight: 600; margin-bottom: 4px;
-}
-.drill-sent-banner .sent-text {
-  font-family: var(--mono); font-size: 12px; color: var(--text-secondary);
-  padding: 4px 0; word-break: break-word;
-}
-.drill-hint { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
 @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ── Responsive ─────────────────────────────────────────── */
@@ -312,21 +296,7 @@ td.expandable:hover { color: var(--accent); }
     </div>
   </div>
 
-  <!-- Drill-down -->
-  <div class="drill-panel" id="drill-panel">
-    <div class="drill-header">
-      <span class="label">Selected:</span>
-      <span class="value" id="drill-value"></span>
-      <span class="drill-status" id="drill-status"></span>
-      <button class="drill-close" id="drill-close" title="Dismiss">&times;</button>
-    </div>
-    <div class="drill-suggestions" id="drill-suggestions"></div>
-    <div class="drill-sent-banner" id="drill-sent-banner">
-      <div class="sent-label">&#10003; Sent to chat</div>
-      <div class="sent-text" id="drill-sent-text"></div>
-    </div>
-    <div class="drill-hint" id="drill-hint"></div>
-  </div>
+  <!-- Drill-down popover is created dynamically -->
 </div>
 
 <script type="module">
@@ -345,9 +315,13 @@ let question = "";
 let normalizedSql = "";
 let hostCaps = null;
 const PAGE_SIZE = 50;
+const FETCH_PAGE_SIZE = 100;
 let renderedCount = 0;
 let numericCols = new Set();
 let scrollObserver = null;
+let totalRowCount = 0;   // total rows available server-side
+let fetchedAll = false;   // whether we've fetched all rows
+let fetching = false;     // prevent concurrent fetches
 
 // ── App init ───────────────────────────────────────────────
 const app = new App({ name: "Illuminate Results Dashboard", version: "1.0.0" });
@@ -394,6 +368,9 @@ function renderDashboard(data) {
   allRows = (table.rows || []).map(r => Array.isArray(r) ? r : Object.values(r));
   filteredRows = [...allRows];
   chartHint = output.chart_hint || null;
+  totalRowCount = table.total_row_count || allRows.length;
+  fetchedAll = allRows.length >= totalRowCount;
+  fetching = false;
 
   // Question and SQL from input or data
   if (data.question) question = data.question;
@@ -488,7 +465,7 @@ function renderNextPage() {
       }
       if (i === 0 && val !== null && val !== undefined) {
         td.classList.add("clickable");
-        td.addEventListener("click", () => drillDown(columns[0], val, row));
+        td.addEventListener("click", (e) => drillDown(columns[0], val, row, e));
       }
       tr.appendChild(td);
     });
@@ -499,10 +476,14 @@ function renderNextPage() {
   updateFooter();
 }
 
-function updateFooter() {
-  document.getElementById("row-count").textContent =
-    `Showing ${renderedCount} of ${filteredRows.length} rows` +
-    (filteredRows.length < allRows.length ? ` (${allRows.length} total)` : "");
+function updateFooter(loadingMsg) {
+  const totalLabel = totalRowCount > allRows.length ? ` of ${totalRowCount} total` : "";
+  const rowEl = document.getElementById("row-count");
+  if (loadingMsg) {
+    rowEl.textContent = loadingMsg;
+  } else {
+    rowEl.textContent = `Showing ${renderedCount} of ${filteredRows.length} loaded${totalLabel}`;
+  }
 
   const filterCount = document.getElementById("filter-count");
   if (filteredRows.length < allRows.length) {
@@ -519,12 +500,64 @@ function setupScrollObserver() {
   if (!sentinel) return;
 
   scrollObserver = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting && renderedCount < filteredRows.length) {
+    if (!entries[0].isIntersecting) return;
+
+    if (renderedCount < filteredRows.length) {
+      // Render more already-loaded rows
       renderNextPage();
+    } else if (!fetchedAll && !fetching) {
+      // Need more data from server
+      fetchMoreRows();
     }
   }, { rootMargin: "200px" });
 
   scrollObserver.observe(sentinel);
+}
+
+async function fetchMoreRows() {
+  if (fetching || fetchedAll || !normalizedSql) return;
+  fetching = true;
+  updateFooter("Loading more rows...");
+
+  try {
+    const result = await app.callServerTool({
+      name: "get_result_page",
+      arguments: {
+        sql: normalizedSql,
+        offset: allRows.length,
+        limit: FETCH_PAGE_SIZE,
+      },
+    });
+
+    let data = result?.structuredContent;
+    if (!data && result?.content?.[0]?.text) {
+      try { data = JSON.parse(result.content[0].text); } catch {}
+    }
+
+    if (data?.status === "ok" && data.rows && data.rows.length > 0) {
+      const newRows = data.rows.map(r => Array.isArray(r) ? r : Object.values(r));
+      allRows.push(...newRows);
+      // Re-apply current filter/sort
+      if (document.getElementById("search-input").value.trim()) {
+        const q = document.getElementById("search-input").value.toLowerCase().trim();
+        const newFiltered = newRows.filter(row =>
+          row.some(val => val !== null && val !== undefined && String(val).toLowerCase().includes(q))
+        );
+        filteredRows.push(...newFiltered);
+      } else {
+        filteredRows.push(...newRows);
+      }
+      if (data.row_count < FETCH_PAGE_SIZE) fetchedAll = true;
+    } else {
+      fetchedAll = true;
+    }
+  } catch {
+    fetchedAll = true; // stop trying on error
+  }
+
+  fetching = false;
+  if (renderedCount < filteredRows.length) renderNextPage();
+  updateFooter();
 }
 
 function isNumericCol(index) {
@@ -706,7 +739,7 @@ async function renderChart() {
         if (elements.length > 0) {
           const idx = elements[0].index;
           const row = allRows[idx];
-          if (row) drillDown(columns[0], row[0], row);
+          if (row) drillDown(columns[0], row[0], row, _evt);
         }
       },
     },
@@ -790,66 +823,86 @@ function csvEscape(val) {
   return s;
 }
 
-// ── Drill-down ─────────────────────────────────────────────
-document.getElementById("drill-close").addEventListener("click", () => {
-  document.getElementById("drill-panel").style.display = "none";
-});
+// ── Drill-down popover ─────────────────────────────────────
+let activeDrillPopover = null;
 
-async function drillDown(colName, value, row) {
-  const panel = document.getElementById("drill-panel");
-  const drillValue = document.getElementById("drill-value");
-  const statusEl = document.getElementById("drill-status");
-  const suggestionsEl = document.getElementById("drill-suggestions");
-  const hintEl = document.getElementById("drill-hint");
+function dismissDrill() {
+  if (activeDrillPopover) { activeDrillPopover.remove(); activeDrillPopover = null; }
+}
+
+// Dismiss on click outside
+document.addEventListener("click", (e) => {
+  if (activeDrillPopover && !activeDrillPopover.contains(e.target) && !e.target.closest("td.clickable")) {
+    dismissDrill();
+  }
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") dismissDrill(); });
+
+async function drillDown(colName, value, row, clickEvent) {
+  dismissDrill();
 
   const rowObj = {};
   columns.forEach((c, i) => { rowObj[c] = row[i]; });
+  const displayVal = JSON.stringify(value);
 
-  drillValue.textContent = `${colName} = ${JSON.stringify(value)}`;
-  statusEl.textContent = "";
-  statusEl.className = "drill-status";
-  suggestionsEl.innerHTML = "";
-  hintEl.textContent = "";
-  panel.style.display = "block";
-
-  // Build suggested follow-up questions
+  // Build suggestions
   const suggestions = buildFollowUpSuggestions(colName, value, rowObj);
-  suggestions.forEach(s => {
-    const btn = document.createElement("button");
-    btn.textContent = s;
-    btn.title = s;
-    btn.addEventListener("click", () => sendFollowUp(s, colName, value, rowObj));
-    suggestionsEl.appendChild(btn);
+  const sugBtns = suggestions.map(s =>
+    `<button title="${s.replace(/"/g, '&quot;')}">${s}</button>`
+  ).join("");
+
+  // Create popover
+  const pop = document.createElement("div");
+  pop.className = "drill-popover";
+  pop.innerHTML = `
+    <div class="drill-header">
+      <span class="label">Selected:</span>
+      <span class="value">${colName} = ${displayVal}</span>
+      <button class="drill-close">&times;</button>
+    </div>
+    <div class="drill-suggestions">${sugBtns}</div>
+  `;
+  pop.addEventListener("click", (e) => e.stopPropagation());
+  document.body.appendChild(pop);
+  activeDrillPopover = pop;
+
+  // Position near the clicked cell
+  const popRect = pop.getBoundingClientRect();
+  let top, left;
+  if (clickEvent) {
+    top = clickEvent.clientY + 8;
+    left = clickEvent.clientX - 20;
+  } else {
+    top = window.innerHeight / 3;
+    left = window.innerWidth / 2 - popRect.width / 2;
+  }
+  // Clamp to viewport
+  if (top + popRect.height > window.innerHeight - 8) top = Math.max(8, (clickEvent?.clientY || top) - popRect.height - 8);
+  if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
+  if (left < 8) left = 8;
+  pop.style.top = top + "px";
+  pop.style.left = left + "px";
+
+  // Wire close button
+  pop.querySelector(".drill-close").addEventListener("click", dismissDrill);
+
+  // Wire suggestion buttons
+  pop.querySelectorAll(".drill-suggestions button").forEach((btn, i) => {
+    btn.addEventListener("click", () => sendFollowUp(suggestions[i], colName, value, rowObj, btn));
   });
 
-  // Attempt to update model context
+  // Update model context in background
   const contextText =
     `User clicked a data point in the Illuminate Results Dashboard:\n` +
     `  Column: ${colName}\n` +
-    `  Value: ${JSON.stringify(value)}\n` +
+    `  Value: ${displayVal}\n` +
     `  Full row: ${JSON.stringify(rowObj)}\n` +
     (normalizedSql ? `  Original query: ${normalizedSql}\n` : "") +
-    (question ? `  Original question: ${question}\n` : "") +
-    `\nSuggested follow-ups the user can see:\n` +
-    suggestions.map(s => `  - "${s}"`).join("\n") +
-    `\n\nWhen the user sends their next message, incorporate this drill-down context. ` +
-    `If they click a suggested follow-up, generate and run the appropriate query.`;
-
-  // Hide any previous sent banner
-  document.getElementById("drill-sent-banner").style.display = "none";
+    (question ? `  Original question: ${question}\n` : "");
 
   try {
     await app.updateModelContext({ context: [{ type: "text", text: contextText }] });
-    statusEl.textContent = "Context updated";
-    statusEl.className = "drill-status ok";
-    log("info", "updateModelContext succeeded for " + colName + "=" + JSON.stringify(value));
-  } catch (err) {
-    const msg = err?.message || String(err);
-    statusEl.textContent = "";
-    log("warn", "updateModelContext failed: " + msg);
-  }
-
-  hintEl.textContent = "Click a suggestion to send it as a follow-up query.";
+  } catch {}
 }
 
 function buildFollowUpSuggestions(colName, value, rowObj) {
@@ -879,16 +932,8 @@ function buildFollowUpSuggestions(colName, value, rowObj) {
   return suggestions.slice(0, 4); // max 4 suggestions
 }
 
-async function sendFollowUp(text, colName, value, rowObj) {
-  const banner = document.getElementById("drill-sent-banner");
-  const bannerText = document.getElementById("drill-sent-text");
-  const hintEl = document.getElementById("drill-hint");
-
-  // Highlight the clicked pill
-  document.querySelectorAll("#drill-suggestions button").forEach(b => b.classList.remove("sent"));
-  event?.target?.closest?.("button")?.classList.add("sent");
-
-  // Set context first so the LLM has the row data when it processes the message
+async function sendFollowUp(text, colName, value, rowObj, btnEl) {
+  // Set context first
   try {
     await app.updateModelContext({
       context: [{ type: "text", text:
@@ -898,28 +943,23 @@ async function sendFollowUp(text, colName, value, rowObj) {
         (normalizedSql ? `  Previous SQL: ${normalizedSql}\n` : "")
       }],
     });
-  } catch { /* supplementary — sendMessage is primary */ }
+  } catch {}
 
-  // Send the prompt directly to the chat input
+  // Send the prompt to the chat
   try {
     await app.sendMessage({
       role: "user",
       content: [{ type: "text", text }],
     });
-    bannerText.textContent = text;
-    banner.style.display = "block";
-    hintEl.textContent = "";
+    if (btnEl) { btnEl.textContent = "Sent!"; btnEl.classList.add("sent"); }
+    setTimeout(dismissDrill, 1500);
     log("info", "sendMessage succeeded: " + text);
   } catch (err) {
-    // Fallback: copy to clipboard if sendMessage isn't supported
-    hintEl.textContent = "Could not send directly. Copying to clipboard instead...";
+    // Fallback: copy to clipboard
     log("warn", "sendMessage failed: " + (err?.message || err));
-    try {
-      await navigator.clipboard.writeText(text);
-      hintEl.textContent = "Copied! Paste into the chat input and send.";
-    } catch {
-      hintEl.textContent = `Paste this into the chat: ${text}`;
-    }
+    try { await navigator.clipboard.writeText(text); } catch {}
+    if (btnEl) { btnEl.textContent = "Copied!"; btnEl.classList.add("sent"); }
+    setTimeout(dismissDrill, 1500);
   }
 }
 

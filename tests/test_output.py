@@ -41,8 +41,8 @@ class OutputComposerTests(unittest.TestCase):
             ],
             output_mode="viz",
         )
-        self.assertIn("vega_lite_spec", payload)
-        self.assertEqual(payload["vega_lite_spec"]["mark"], "line")
+        self.assertIn("chart_hint", payload)
+        self.assertEqual(payload["chart_hint"]["mark"], "line")
         self.assertEqual(payload["chart_hint"]["intent"], "trend")
         self.assertIn("viz", payload["output_parts"])
 
@@ -53,9 +53,9 @@ class OutputComposerTests(unittest.TestCase):
             rows=[(10,), (11,), (12,), (13,)],
             output_mode="viz",
         )
-        self.assertIn("vega_lite_spec", payload)
+        self.assertIn("chart_hint", payload)
         self.assertEqual(payload["chart_hint"]["intent"], "distribution")
-        self.assertEqual(payload["vega_lite_spec"]["encoding"]["x"]["bin"], True)
+        self.assertEqual(payload["chart_hint"]["mark"], "bar")
 
     def test_viz_mode_builds_scatter_for_relationship(self) -> None:
         payload = self.composer.compose(
@@ -64,8 +64,8 @@ class OutputComposerTests(unittest.TestCase):
             rows=[(1.2, 0.4), (2.1, 0.7)],
             output_mode="viz",
         )
-        self.assertIn("vega_lite_spec", payload)
-        self.assertEqual(payload["vega_lite_spec"]["mark"], "point")
+        self.assertIn("chart_hint", payload)
+        self.assertEqual(payload["chart_hint"]["mark"], "point")
         self.assertEqual(payload["chart_hint"]["intent"], "relationship")
 
     def test_viz_mode_adds_warning_when_unsuitable(self) -> None:

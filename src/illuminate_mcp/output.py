@@ -18,12 +18,19 @@ class OutputComposer:
         columns: Sequence[str],
         rows: Sequence[Sequence],
         output_mode: str = "auto",
+        max_initial_rows: int = 0,
     ) -> dict:
         mode = self._normalize_mode(output_mode)
         safe_rows = [self._to_json_safe_row(row) for row in rows]
+        total_row_count = len(safe_rows)
         summary = self._build_summary(columns, rows)
         payload = {"summary_text": summary[: self._max_summary_length]}
         parts = ["text"]
+
+        # If max_initial_rows is set, send only the first page (app fetches more)
+        send_rows = safe_rows
+        if max_initial_rows > 0 and len(safe_rows) > max_initial_rows:
+            send_rows = safe_rows[:max_initial_rows]
 
         include_table = mode in {"auto", "table", "viz"}
         include_viz = mode == "viz" or (mode == "auto" and self._wants_visualization(question))
@@ -32,15 +39,16 @@ class OutputComposer:
         if include_table:
             payload["table"] = {
                 "columns": list(columns),
-                "rows": safe_rows,
-                "row_count": len(safe_rows),
+                "rows": send_rows,
+                "row_count": len(send_rows),
+                "total_row_count": total_row_count,
             }
             parts.append("table")
 
         if include_viz:
+            # Only send chart_hint (intent + mark), not data — app builds chart from table rows
             spec = self._build_vega_lite_spec(question, columns, safe_rows)
             if spec:
-                payload["vega_lite_spec"] = spec
                 payload["chart_hint"] = {
                     "intent": viz_intent,
                     "mark": spec.get("mark"),

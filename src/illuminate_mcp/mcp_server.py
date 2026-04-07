@@ -149,15 +149,17 @@ class MCPServer:
                 "prompts": {"listChanged": False},
             },
             "instructions": (
-                "Use list_domains/list_entities/describe_entity for query planning and SQL generation. "
-                "Use run_query for data gathering — it returns data silently with no UI. "
-                "Use display_query to present final results to the user — pass the result_id from a "
-                "previous run_query response (preferred), or columns+rows for small datasets. "
-                "If the answer is text analysis with no data to show, just respond in text without calling display_query. "
-                "Only call open_schema_explorer when the user explicitly asks to explore or browse the schema — "
-                "never call it as part of your own query planning workflow. "
-                "Use display_sql when the user asks to see, generate, or review a SQL query — shows it formatted with copy button. "
-                "Use discover_insights when the user asks for anomalies, red flags, insights, or what they should look at. "
+                "IMPORTANT — Tool selection rules:\n"
+                "1. run_query is your DEFAULT query tool. Use it for ALL data gathering and analysis. "
+                "It returns results to you with no UI rendered.\n"
+                "2. display_query is ONLY for showing the user an interactive dashboard. Call it AFTER "
+                "you have already gathered data with run_query and are ready to present final results. "
+                "Pass the same SQL you used with run_query (Snowflake caches results). "
+                "If the answer is text analysis, do NOT call display_query.\n"
+                "3. display_sql is for when the user asks to see or review a SQL query.\n"
+                "4. discover_insights is for when the user asks for anomalies, red flags, or what to look at.\n"
+                "5. open_schema_explorer is ONLY when the user explicitly asks to browse the schema.\n"
+                "6. list_domains/list_entities/describe_entity are for query planning.\n"
                 + metadata_note
             ),
         }
@@ -193,11 +195,19 @@ class MCPServer:
                 "isError": True,
             }
 
+        # For display tools with UI, send a slim text summary to the LLM
+        # (the full data goes to the app via structuredContent)
+        if name in {"display_query", "display_sql", "discover_insights", "open_schema_explorer"}:
+            summary = payload.get("output", {}).get("summary_text") or payload.get("status", "ok")
+            text_content = summary
+        else:
+            text_content = json.dumps(payload, indent=2, sort_keys=True, default=str)
+
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(payload, indent=2, sort_keys=True, default=str),
+                    "text": text_content,
                 }
             ],
             "structuredContent": payload,
