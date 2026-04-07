@@ -65,7 +65,9 @@ The server instructs the LLM to use tools in this order:
 
 ## Quick start
 
-**Requirements:** Python 3.12+ (use `pyenv` recommended)
+### macOS / Linux
+
+**Requirements:** Python 3.12+ (`pyenv` recommended)
 
 ```bash
 # 1. Clone and enter the repo
@@ -90,6 +92,64 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 # 7. Start the server
 illuminate-mcp
 ```
+
+### Windows
+
+**Requirements:** Python 3.12+ from [python.org](https://www.python.org/downloads/) or via `winget install Python.Python.3.12`
+
+```powershell
+# 1. Clone and enter the repo
+cd illuminate-mcp
+
+# 2. Install package
+python -m pip install -e .
+
+# 3. Install Snowflake connector (required for live queries)
+python -m pip install -r requirements-snowflake.txt
+
+# 4. Configure environment
+copy .env.example .env
+# Edit .env with your Snowflake credentials and desired settings
+
+# 5. Run tests
+set PYTHONPATH=src
+python -m unittest discover -s tests -v
+
+# 6. Start the server
+illuminate-mcp
+```
+
+### Claude Code / Claude Desktop configuration
+
+Add the server to your MCP client config. The config file location depends on your platform:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "illuminate-mcp": {
+      "command": "illuminate-mcp",
+      "env": {
+        "SNOWFLAKE_ACCOUNT": "your-account",
+        "SNOWFLAKE_USER": "your-user",
+        "SNOWFLAKE_PASSWORD": "your-password",
+        "SNOWFLAKE_ROLE": "your-role",
+        "SNOWFLAKE_WAREHOUSE": "your-warehouse",
+        "SNOWFLAKE_DATABASE": "your-database",
+        "ENABLE_QUERY_EXECUTION": "true",
+        "ENABLE_METADATA_INTROSPECTION": "true"
+      }
+    }
+  }
+}
+```
+
+> **Note:** Env vars in the client config take precedence over `.env`. You can put credentials in the client config and keep everything else in `.env` — the server merges both, with client config winning on conflicts.
+
+> **Windows note:** If `illuminate-mcp` is not found in PATH after pip install, use the full path to the script: `"command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\illuminate-mcp.exe"`
 
 The server automatically loads `.env` from the project directory on startup — no manual env sourcing needed.
 
