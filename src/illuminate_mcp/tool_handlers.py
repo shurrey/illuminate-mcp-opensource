@@ -91,10 +91,11 @@ class ToolRegistry:
             {
                 "name": "open_schema_explorer",
                 "description": (
-                    "Open the interactive visual schema explorer for the user to browse domains, "
-                    "entities, columns, and relationships. Only call this when the user explicitly "
-                    "asks to explore or browse the schema. Do NOT call this for query planning — "
-                    "use list_domains, list_entities, and describe_entity instead."
+                    "SCHEMA EXPLORER — Open the interactive visual schema browser. "
+                    "Use this tool when the user wants to explore, browse, view, or inspect the "
+                    "data schema, domains, entities, columns, or relationships visually. "
+                    "This is the primary tool for schema exploration and browsing. "
+                    "Do NOT use for query planning — use list_domains/list_entities/describe_entity instead."
                 ),
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
                 "_meta": {
